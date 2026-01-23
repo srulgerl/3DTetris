@@ -230,9 +230,10 @@ export const useGameStore = create<GameState>((set, get) => ({
         const { grid, activePiece, score, linesCleared, level } = get();
         if (!activePiece) return;
 
+        // 1. Lock blocks
+        // We clone the grid so we don't mutate state directly until set()
         const newGrid = grid.map(layer => layer.map(row => [...row]));
 
-        // Lock blocks
         for (const block of activePiece.shape) {
             const x = activePiece.position.x + block.x;
             const y = activePiece.position.y + block.y;
@@ -254,68 +255,94 @@ export const useGameStore = create<GameState>((set, get) => ({
             }
         }
 
-        // Check clears (Full 6x6 layers)
-        let clearedCount = 0;
-        const remainingLayers: (GridCell | null)[][][] = [];
+        // 2. Identify blocks to clear
+        // We'll mark blocks for removal. Set of coordinates string "y,z,x"
+        const toClear = new Set<string>();
+        let linesFound = 0;
 
         for (let y = 0; y < GRID_SIZE.HEIGHT; y++) {
-            let isFull = true;
+            // Check X-rows (iterate Z)
             for (let z = 0; z < GRID_SIZE.ROWS; z++) {
+                let isRowFull = true;
                 for (let x = 0; x < GRID_SIZE.COLS; x++) {
                     if (!newGrid[y][z][x]) {
-                        isFull = false;
+                        isRowFull = false;
                         break;
                     }
                 }
-                if (!isFull) break;
+                if (isRowFull) {
+                    linesFound++;
+                    for (let x = 0; x < GRID_SIZE.COLS; x++) {
+                        toClear.add(`${y},${z},${x}`);
+                    }
+                }
             }
 
-            if (isFull) {
-                clearedCount++;
-            } else {
-                remainingLayers.push(newGrid[y]);
+            // Check Z-columns (iterate X)
+            for (let x = 0; x < GRID_SIZE.COLS; x++) {
+                let isColFull = true;
+                for (let z = 0; z < GRID_SIZE.ROWS; z++) {
+                    if (!newGrid[y][z][x]) {
+                        isColFull = false;
+                        break;
+                    }
+                }
+                if (isColFull) {
+                    linesFound++;
+                    for (let z = 0; z < GRID_SIZE.ROWS; z++) {
+                        toClear.add(`${y},${z},${x}`);
+                    }
+                }
             }
         }
 
-        while (remainingLayers.length < GRID_SIZE.HEIGHT) {
-            remainingLayers.push(
-                Array.from({ length: GRID_SIZE.ROWS }, () => Array(GRID_SIZE.COLS).fill(null))
-            );
-        }
-
-        // Rule C
-        const C = 3;
-        const previousTotal = linesCleared;
-        const newTotal = linesCleared + clearedCount;
-        const shouldInject = Math.floor(newTotal / C) > Math.floor(previousTotal / C);
-
-        if (shouldInject) {
-            const filledCells: { y: number, z: number, x: number }[] = [];
-            remainingLayers.forEach((layer, y) => {
-                layer.forEach((row, z) => {
-                    row.forEach((cell, x) => {
-                        if (cell) filledCells.push({ y, z, x });
-                    });
-                });
+        // 3. Remove cleared blocks
+        if (toClear.size > 0) {
+            toClear.forEach(coord => {
+                const [y, z, x] = coord.split(',').map(Number);
+                if (newGrid[y] && newGrid[y][z]) {
+                    newGrid[y][z][x] = null;
+                }
             });
+        }
 
-            if (filledCells.length > 0) {
-                const rand = filledCells[Math.floor(Math.random() * filledCells.length)];
-                const cell = remainingLayers[rand.y][rand.z][rand.x];
-                if (cell) cell!.isSpecial = true;
+        // 4. Apply Gravity (Collapse downwards)
+        // For each vertical column (x, z), stack blocks from bottom up
+        for (let x = 0; x < GRID_SIZE.COLS; x++) {
+            for (let z = 0; z < GRID_SIZE.ROWS; z++) {
+                const stack: GridCell[] = [];
+                // Collect
+                for (let y = 0; y < GRID_SIZE.HEIGHT; y++) {
+                    if (newGrid[y][z][x]) {
+                        stack.push(newGrid[y][z][x]!);
+                    }
+                }
+                // Refill
+                for (let y = 0; y < GRID_SIZE.HEIGHT; y++) {
+                    if (y < stack.length) {
+                        newGrid[y][z][x] = stack[y];
+                    } else {
+                        newGrid[y][z][x] = null;
+                    }
+                }
             }
         }
 
         const points = [0, SCORING.SINGLE, SCORING.DOUBLE, SCORING.TRIPLE, SCORING.TETRIS];
-        const newScore = score + (points[clearedCount] || (clearedCount * 200)) * level;
+        // Cap points index
+        const scoreIndex = Math.min(linesFound, 4);
+        const addedScore = (points[scoreIndex] || (linesFound * 200)) * level;
+
+        const newTotal = linesCleared + linesFound;
+        const newScore = score + addedScore;
         const newLevel = Math.floor(newTotal / 10) + 1;
 
-        if (clearedCount > 0) soundManager.play('clear');
+        if (linesFound > 0) soundManager.play('clear');
         if (newLevel > level) soundManager.play('levelup');
         soundManager.setRate(1 + (newLevel - 1) * 0.1);
 
         set({
-            grid: remainingLayers,
+            grid: newGrid,
             score: newScore,
             linesCleared: newTotal,
             level: newLevel,
